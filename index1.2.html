@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>随机视频</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: none;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        #videoContainer {
+            position: fixed;
+            width: 100vw;
+            height: 100vh;
+            background: #000;
+            overflow: hidden;
+        }
+
+        #videoPlayer {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            transition: opacity 0.3s;
+        }
+
+        .loader {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            display: none;
+            z-index: 10;
+        }
+
+        @keyframes spin {
+            to { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        .status-indicator {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 5;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="loader"></div>
+    <div class="status-indicator"></div>
+    <div id="videoContainer">
+        <video id="videoPlayer" controls playsinline>
+            <source id="videoSource" type="video/mp4">
+        </video>
+    </div>
+
+    <script>
+        // 核心变量
+        let isInteracting = false;
+        const SWIPE_THRESHOLD = 60;
+        let currentVideoUrl = '';
+        let nextVideoUrl = '';
+        let playHistory = [];
+        const MAX_HISTORY = 10;
+        const loader = document.querySelector('.loader');
+        const statusIndicator = document.querySelector('.status-indicator');
+
+        async function init() {
+            setupTouchEvents();
+            setupWheelEvents();
+            setupKeyboardEvents();
+            setupVideoEvents();
+            setupPreload();
+            await loadInitialVideo();
+        }
+
+        // 触摸事件处理
+        function setupTouchEvents() {
+            let touchStartY = 0;
+            
+            document.addEventListener('touchstart', e => {
+                // 仅在非视频元素上阻止默认行为
+                if (e.target.tagName !== 'VIDEO') {
+                    e.preventDefault();
+                }
+                touchStartY = e.touches[0].clientY;
+            }, { passive: false });
+
+            document.addEventListener('touchend', e => {
+                if (isInteracting) return;
+                const deltaY = e.changedTouches[0].clientY - touchStartY;
+                
+                if (Math.abs(deltaY) > SWIPE_THRESHOLD) {
+                    handleInteraction(deltaY > 0 ? 'up' : 'down');
+                }
+            });
+        }
+
+        // 滚轮事件处理
+        function setupWheelEvents() {
+            document.addEventListener('wheel', e => {
+                if (isInteracting) return;
+                if (Math.abs(e.deltaY) > 50) {
+                    handleInteraction(e.deltaY > 0 ? 'down' : 'up');
+                }
+            }, { passive: true });
+        }
+
+        // 键盘事件处理
+        function setupKeyboardEvents() {
+            document.addEventListener('keydown', e => {
+                if ([38, 40].includes(e.keyCode)) { 
+                    handleInteraction(e.keyCode === 38 ? 'up' : 'down');
+                }
+            });
+        }
+
+        // 核心交互逻辑
+        function handleInteraction(direction) {
+            if (isInteracting) return;
+            isInteracting = true;
+            
+            if (direction === 'up') {
+                loadPreviousVideo();
+            } else {
+                loadNextVideo();
+            }
+            
+            setTimeout(() => isInteracting = false, 500);
+        }
+
+        // 视频事件处理
+        function setupVideoEvents() {
+            const video = document.getElementById('videoPlayer');
+            video.addEventListener('ended', () => loadNextVideo());
+            
+            // 缓冲事件
+            video.addEventListener('waiting', () => {
+                showStatus('缓冲中...');
+            });
+            
+            video.addEventListener('playing', () => {
+                hideStatus();
+            });
+            
+            // 错误处理
+            video.addEventListener('error', (e) => {
+                console.error('视频播放错误:', e);
+                showStatus('加载失败，切换中...');
+                setTimeout(() => {
+                    loadNextVideo();
+                }, 1500);
+            });
+        }
+
+        // 预加载逻辑
+        function setupPreload() {
+            const video = document.getElementById('videoPlayer');
+            video.addEventListener('timeupdate', function() {
+                if (this.currentTime > this.duration * 0.25 && !nextVideoUrl) {
+                    preloadNextVideo();
+                }
+            });
+        }
+
+        async function preloadNextVideo() {
+            try {
+                const url = await fetchVideoUrl();
+                nextVideoUrl = url;
+                const preloader = document.createElement('video');
+                preloader.src = url;
+                preloader.preload = 'auto';
+            } catch (error) {
+                console.error('预加载失败:', error);
+            }
+        }
+
+        // 状态显示
+        function showStatus(message) {
+            statusIndicator.textContent = message;
+            statusIndicator.style.display = 'block';
+        }
+
+        function hideStatus() {
+            statusIndicator.style.display = 'none';
+        }
+
+        // 初始化加载视频
+        async function loadInitialVideo() {
+            try {
+                loader.style.display = 'block';
+                const url = await fetchVideoUrl();
+                await setVideoSource(url);
+                playHistory.push(url);
+                loader.style.display = 'none';
+            } catch (error) {
+                console.error('初始化加载失败:', error);
+                await setVideoSource(getFallbackVideo());
+                loader.style.display = 'none';
+            }
+        }
+
+        // 加载新视频
+        async function loadNextVideo() {
+            if (nextVideoUrl) {
+                await setVideoSource(nextVideoUrl);
+                playHistory.push(nextVideoUrl);
+                nextVideoUrl = '';
+                preloadNextVideo();
+            } else {
+                const url = await fetchVideoUrl();
+                await setVideoSource(url);
+                playHistory.push(url);
+            }
+        }
+
+        // 返回上一个视频
+        async function loadPreviousVideo() {
+            if (playHistory.length > 1) {
+                playHistory.pop(); // 移除当前
+                const prevUrl = playHistory.pop();
+                await setVideoSource(prevUrl);
+                playHistory.push(prevUrl);
+            }
+        }
+
+        // 设置视频源
+        async function setVideoSource(url) {
+            const video = document.getElementById('videoPlayer');
+            const source = document.getElementById('videoSource');
+            
+            loader.style.display = 'block';
+            showStatus('加载中...');
+            video.style.opacity = 0;
+            
+            await new Promise(r => setTimeout(r, 300));
+            
+            source.src = url;
+            currentVideoUrl = url;
+            video.load();
+            
+            try {
+                await video.play();
+            } catch (error) {
+                console.error('自动播放失败:', error);
+                // 在安卓设备上，首次打开页面需要手动点击播放
+            }
+            
+            video.style.opacity = 1;
+            loader.style.display = 'none';
+            hideStatus();
+        }
+
+        // 获取视频地址
+        async function fetchVideoUrl() {
+            try {
+                const response = await fetch('http://api.huaiyan.top:81/api/dy/1.php');   // 此处更换自己api地址
+                if (!response.ok) throw new Error('API响应错误');
+                const data = await response.json();
+                return data.data.url;
+            } catch (error) {
+                console.error('API请求失败:', error);
+                return getFallbackVideo();
+            }
+        }
+
+        // 获取备用视频
+        function getFallbackVideo() {
+            const fallbacks = [
+                'https://assets.codepen.io/3364143/sample.mp4',
+                'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+            ];
+            return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+        }
+
+        // 启动初始化
+        window.onload = init;
+    </script>
+</body>
+</html>
